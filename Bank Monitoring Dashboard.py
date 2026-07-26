@@ -13,7 +13,9 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Image as RLImage
-from reportlab.platypus import KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer
+from reportlab.platypus import (
+    KeepTogether, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+)
 
 st.set_page_config(page_title="Bank Market Monitor", page_icon="🏦", layout="wide")
 
@@ -26,6 +28,9 @@ INK = "#33404D"
 MUTED = "#7A8794"
 RULE = "#D9DEE4"
 GRID = "#EDF0F3"
+PANEL = "#F2F5F8"
+GOOD = "#548235"
+BAD = "#C00000"
 
 REGION_COLORS = {
     "United States": "#17365D",
@@ -120,15 +125,6 @@ METRIC_INFO = {
     },
 }
 
-RISK_ORDER = ["Low", "Moderate", "Elevated", "High"]
-RISK_COLORS = {
-    "Low": "#548235",
-    "Moderate": "#FFC000",
-    "Elevated": "#ED7D31",
-    "High": "#C00000",
-    "Not scored": "#7F7F7F",
-}
-
 
 def _source_bytes(uploaded_file) -> bytes:
     if uploaded_file is not None:
@@ -181,35 +177,6 @@ def load_bank_monitor(file_bytes: bytes) -> pd.DataFrame:
     equity_cols = [f"Equity {p}" for p in PERIODS]
     df[equity_cols] = df[equity_cols] * 100
     return df
-
-
-@st.cache_data(show_spinner=False)
-def load_risk_scores(file_bytes: bytes) -> pd.DataFrame:
-    raw = pd.read_excel(
-        io.BytesIO(file_bytes), sheet_name="Risk Score Model", header=6,
-        usecols="A:H", engine="openpyxl"
-    )
-    raw.columns = [
-        "Bank", "Region Raw", "5Y CDS (bps)", "2-Week Equity Return (%)",
-        "CDS Risk Percentile", "Equity Risk Percentile",
-        "Composite Risk Score", "Risk Category",
-    ]
-    raw["Bank"] = raw["Bank"].map(_clean_text)
-    numeric_source = pd.to_numeric(raw["5Y CDS (bps)"], errors="coerce")
-    df = raw[raw["Bank"].ne("") & numeric_source.notna()].copy()
-    df["Region"] = [
-        _normalize_region(bank, region) for bank, region in zip(df["Bank"], df["Region Raw"])
-    ]
-    numeric_cols = [
-        "5Y CDS (bps)", "2-Week Equity Return (%)", "CDS Risk Percentile",
-        "Equity Risk Percentile", "Composite Risk Score",
-    ]
-    df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
-    df["2-Week Equity Return (%)"] = df["2-Week Equity Return (%)"] * 100
-    df["Risk Category"] = df["Risk Category"].where(
-        df["Risk Category"].isin(RISK_ORDER), "Not scored"
-    )
-    return df.drop(columns=["Region Raw"])
 
 
 def fmt(value: float, unit: str = "", decimals: int = 1) -> str:
@@ -284,45 +251,46 @@ def chart_heatmap(df: pd.DataFrame, metric: str, max_rows: int | None = None) ->
     return fig
 
 
-def chart_risk_scores(df: pd.DataFrame) -> go.Figure:
-    plot_df = df.dropna(subset=["Composite Risk Score"]).sort_values("Composite Risk Score")
-    fig = px.bar(
-        plot_df, x="Composite Risk Score", y="Bank", color="Risk Category",
-        color_discrete_map=RISK_COLORS, category_orders={"Risk Category": RISK_ORDER},
-        orientation="h", range_x=[0, 100],
-        hover_data={
-            "Region": True, "CDS Risk Percentile": ":.1f",
-            "Equity Risk Percentile": ":.1f", "Composite Risk Score": ":.1f",
-        },
-        title="Composite bank market risk score",
-    )
-    for x in (25, 50, 75):
-        fig.add_vline(x=x, line_width=1, line_dash="dot", line_color=MUTED)
-    fig.update_layout(
-        height=max(480, 28 * len(plot_df)), legend_title_text="Risk category",
-        margin=dict(l=10, r=10, t=60, b=10),
-    )
-    return fig
+# --- Executive summary helpers ----------------------------------------------
+def period_extremes(df: pd.DataFrame, period: str) -> dict:
+    """Return the banks at the extremes of CDS and equity moves for a period."""
+    cds_col, eq_col = f"CDS {period}", f"Equity {period}"
+    out: dict = {}
+    cds = df.dropna(subset=[cds_col])
+    equity = df.dropna(subset=[eq_col])
+    if not cds.empty:
+        out["cds_wide"] = cds.loc[cds[cds_col].idxmax()]
+        out["cds_tight"] = cds.loc[cds[cds_col].idxmin()]
+    if not equity.empty:
+        out["eq_strong"] = equity.loc[equity[eq_col].idxmax()]
+        out["eq_weak"] = equity.loc[equity[eq_col].idxmin()]
+    return out
 
 
 def generate_summary(df: pd.DataFrame, period: str) -> list[str]:
+    """Auto-generated key-takeaway bullets used when the user provides none."""
     statements: list[str] = []
     cds_col, eq_col = f"CDS {period}", f"Equity {period}"
     cds = df.dropna(subset=[cds_col])
     equity = df.dropna(subset=[eq_col])
     if not cds.empty:
-        wider = cds.loc[cds[cds_col].idxmax()]
-        tighter = cds.loc[cds[cds_col].idxmin()]
+        low, high = cds[cds_col].min(), cds[cds_col].max()
         statements.append(
-            f"{wider['Bank']} recorded the largest CDS widening at {fmt(wider[cds_col], 'bps')}; "
-            f"{tighter['Bank']} tightened the most at {fmt(tighter[cds_col], 'bps')}."
+            f"Bank CDS moves ranged from {fmt(low, 'bps')} to {fmt(high, 'bps')} "
+            f"over the {period} window."
+        )
+        wider = cds.loc[cds[cds_col].idxmax()]
+        statements.append(
+            f"{wider['Bank']} saw the largest CDS widening at {fmt(wider[cds_col], 'bps')}, "
+            "the biggest deterioration in perceived credit risk."
         )
     if not equity.empty:
-        weakest = equity.loc[equity[eq_col].idxmin()]
         strongest = equity.loc[equity[eq_col].idxmax()]
+        weakest = equity.loc[equity[eq_col].idxmin()]
         statements.append(
-            f"{weakest['Bank']} had the weakest equity performance at {fmt(weakest[eq_col], '%')}, "
-            f"while {strongest['Bank']} was strongest at {fmt(strongest[eq_col], '%')}."
+            f"Equity performance was led by {strongest['Bank']} "
+            f"({fmt(strongest[eq_col], '%')}) and weakest at {weakest['Bank']} "
+            f"({fmt(weakest[eq_col], '%')})."
         )
     return statements
 
@@ -378,9 +346,124 @@ def _footer(canvas, doc):
     canvas.restoreState()
 
 
+def _exec_styles(styles) -> None:
+    """Register the paragraph styles used by the executive-summary page."""
+    definitions = {
+        "ExecTitle": dict(
+            fontName="Helvetica-Bold", fontSize=19, leading=23,
+            textColor=colors.HexColor(NAVY), spaceAfter=2,
+        ),
+        "ExecSub": dict(
+            fontName="Helvetica", fontSize=10.5, leading=14,
+            textColor=colors.HexColor(MUTED),
+        ),
+        "ExecHeading": dict(
+            fontName="Helvetica-Bold", fontSize=13, leading=16,
+            textColor=colors.HexColor(NAVY), spaceBefore=6, spaceAfter=6,
+        ),
+        "ExecBullet": dict(
+            fontName="Helvetica", fontSize=10.5, leading=15,
+            textColor=colors.HexColor(INK), leftIndent=14, bulletIndent=2, spaceAfter=4,
+        ),
+        "CardLabel": dict(
+            fontName="Helvetica-Bold", fontSize=7, leading=9,
+            textColor=colors.HexColor(MUTED),
+        ),
+        "CardName": dict(
+            fontName="Helvetica-Bold", fontSize=12.5, leading=15,
+            textColor=colors.HexColor(NAVY),
+        ),
+        "CardValue": dict(fontName="Helvetica-Bold", fontSize=14, leading=17),
+    }
+    for name, kwargs in definitions.items():
+        if name not in styles:
+            styles.add(ParagraphStyle(name=name, parent=styles["BodyText"], **kwargs))
+
+
+def _metric_card(label: str, name: str, value_str: str, accent: str,
+                 width: float, styles) -> Table:
+    lab = Paragraph(label.upper(), styles["CardLabel"])
+    nm = Paragraph(name, styles["CardName"])
+    val = Paragraph(f'<font color="{accent}">{value_str}</font>', styles["CardValue"])
+    card = Table([[lab], [nm], [val]], colWidths=[width])
+    card.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(PANEL)),
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor(RULE)),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+        ("TOPPADDING", (0, 0), (0, 0), 11),
+        ("BOTTOMPADDING", (0, 0), (0, 0), 1),
+        ("TOPPADDING", (0, 1), (0, 1), 0),
+        ("BOTTOMPADDING", (0, 1), (0, 1), 1),
+        ("TOPPADDING", (0, 2), (0, 2), 2),
+        ("BOTTOMPADDING", (0, 2), (0, 2), 12),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    return card
+
+
+def _card_row(cards: list, col_w: float) -> Table:
+    row = Table([cards], colWidths=[col_w] * len(cards))
+    row.setStyle(TableStyle([
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-2, -1), 10),
+        ("RIGHTPADDING", (-1, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    return row
+
+
+def _exec_summary_flowables(df: pd.DataFrame, period: str, takeaways: list[str],
+                            styles, usable_width: float) -> list:
+    flow: list = [
+        Paragraph(f"Executive Summary — Last {period}", styles["ExecTitle"]),
+        Paragraph(
+            "Largest market movements across bank credit and equity markets.",
+            styles["ExecSub"],
+        ),
+        Spacer(1, 14),
+    ]
+
+    col_w = usable_width / 4.0
+    card_w = col_w - 10
+    # Show the selected period first, then 5 day as a secondary reference row.
+    display_periods = [period] + (["5 day"] if period != "5 day" else [])
+
+    for display_period in display_periods:
+        extremes = period_extremes(df, display_period)
+        suffix = display_period.upper()
+        cds_col, eq_col = f"CDS {display_period}", f"Equity {display_period}"
+
+        def build(key: str, label: str, column: str, unit: str, accent: str) -> Table:
+            row = extremes.get(key)
+            if row is None:
+                return _metric_card(f"{label} · {suffix}", "N/A", "N/A", MUTED, card_w, styles)
+            return _metric_card(
+                f"{label} · {suffix}", str(row["Bank"]),
+                fmt(row[column], unit), accent, card_w, styles,
+            )
+
+        cards = [
+            build("cds_wide", "Largest CDS widening", cds_col, "bps", BAD),
+            build("cds_tight", "Largest CDS tightening", cds_col, "bps", GOOD),
+            build("eq_strong", "Strongest equity", eq_col, "%", GOOD),
+            build("eq_weak", "Weakest equity", eq_col, "%", BAD),
+        ]
+        flow.append(_card_row(cards, col_w))
+        flow.append(Spacer(1, 10))
+
+    flow.append(Spacer(1, 8))
+    flow.append(Paragraph("Key Takeaways", styles["ExecHeading"]))
+    for statement in takeaways:
+        flow.append(Paragraph(statement, styles["ExecBullet"], bulletText="•"))
+    return flow
+
+
 def make_pdf(
-    df: pd.DataFrame, risk_df: pd.DataFrame, period: str,
-    selected_regions: Iterable[str], top_n: int,
+    df: pd.DataFrame, period: str, selected_regions: Iterable[str],
+    top_n: int, takeaways: list[str],
 ) -> bytes:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -390,6 +473,7 @@ def make_pdf(
     )
     doc.footer_note = f"Bank Market Monitor  ·  {period}  ·  {', '.join(selected_regions)}"
     styles = getSampleStyleSheet()
+    _exec_styles(styles)
     title_style = ParagraphStyle(
         name="ChartTitle", parent=styles["BodyText"], fontName="Helvetica-Bold",
         fontSize=13, leading=TITLE_H, textColor=colors.HexColor(NAVY),
@@ -407,10 +491,11 @@ def make_pdf(
         chart_heatmap(df, "CDS", max_rows=PDF_MAX_ROWS),
         chart_heatmap(df, "Equity", max_rows=PDF_MAX_ROWS),
     ]
-    if not risk_df.empty:
-        figures.append(chart_risk_scores(risk_df))
 
-    story = []
+    # Page 1: executive summary.
+    story: list = _exec_summary_flowables(df, period, takeaways, styles, doc.width)
+    story.append(PageBreak())
+
     for index, fig in enumerate(figures):
         heading = (fig.layout.title.text or "").strip()
         png = _fig_to_png(fig, panel_w, panel_h)
@@ -428,7 +513,7 @@ def make_pdf(
 
 # --- App --------------------------------------------------------------------
 st.title("🏦 Bank Market Monitor")
-st.caption("Interactive monitoring of bank CDS spreads, equity performance, and composite market risk scores.")
+st.caption("Interactive monitoring of bank CDS spreads and equity performance.")
 
 with st.sidebar:
     st.header("Data and filters")
@@ -436,7 +521,6 @@ with st.sidebar:
     try:
         source = _source_bytes(uploaded)
         data = load_bank_monitor(source)
-        risk_scores = load_risk_scores(source)
     except Exception as exc:
         st.error(f"Could not read the workbook: {exc}")
         st.stop()
@@ -447,22 +531,30 @@ with st.sidebar:
     top_n = st.slider("Banks in ranked charts", 5, max(5, min(30, len(data))), min(15, len(data)))
     search = st.text_input("Search bank")
 
+    st.markdown("---")
+    st.subheader("Executive summary")
+    custom_takeaways_raw = st.text_area(
+        "Key takeaways (one per line — leave blank to auto-generate)",
+        height=150,
+        placeholder="Enter your own takeaways, one per line…",
+        help="These appear in the Overview tab and on the executive-summary page of the PDF.",
+    )
+
 filtered = data[data["Region"].isin(selected_regions)].copy()
-filtered_risk = risk_scores[risk_scores["Region"].isin(selected_regions)].copy()
 if search:
     filtered = filtered[filtered["Bank"].str.contains(search, case=False, na=False)]
-    filtered_risk = filtered_risk[filtered_risk["Bank"].str.contains(search, case=False, na=False)]
 if filtered.empty:
     st.warning("No banks match the selected filters.")
     st.stop()
 
+# User-authored takeaways take priority; otherwise fall back to auto-generation.
+custom_takeaways = [line.strip() for line in custom_takeaways_raw.splitlines() if line.strip()]
+takeaways = custom_takeaways or generate_summary(filtered, period)
+
 cds_col, eq_col = f"CDS {period}", f"Equity {period}"
 worst_cds = filtered.loc[filtered[cds_col].idxmax()] if filtered[cds_col].notna().any() else None
 worst_equity = filtered.loc[filtered[eq_col].idxmin()] if filtered[eq_col].notna().any() else None
-highest_risk = (
-    filtered_risk.loc[filtered_risk["Composite Risk Score"].idxmax()]
-    if filtered_risk["Composite Risk Score"].notna().any() else None
-)
+best_equity = filtered.loc[filtered[eq_col].idxmax()] if filtered[eq_col].notna().any() else None
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Banks monitored", len(filtered))
@@ -476,18 +568,19 @@ k3.metric(
     delta_color="inverse",
 )
 k4.metric(
-    "Highest composite risk", highest_risk["Bank"] if highest_risk is not None else "N/A",
-    fmt(highest_risk["Composite Risk Score"], "", 1) if highest_risk is not None else None,
-    delta_color="inverse",
+    "Strongest equity market", best_equity["Bank"] if best_equity is not None else "N/A",
+    fmt(best_equity[eq_col], "%") if best_equity is not None else None,
 )
 
-overview_tab, ranked_tab, heatmap_tab, risk_tab, data_tab, report_tab = st.tabs([
-    "Overview", "Ranked charts", "Heatmap", "Risk score", "Data explorer", "Report",
+overview_tab, ranked_tab, heatmap_tab, data_tab, report_tab = st.tabs([
+    "Overview", "Ranked charts", "Heatmap", "Data explorer", "Report",
 ])
 
 with overview_tab:
     st.subheader(f"Executive summary — {period}")
-    for statement in generate_summary(filtered, period):
+    if custom_takeaways:
+        st.caption("Showing your custom key takeaways.")
+    for statement in takeaways:
         st.markdown(f"- {statement}")
     st.plotly_chart(chart_scatter(filtered, period), use_container_width=True)
 
@@ -499,32 +592,6 @@ with ranked_tab:
 with heatmap_tab:
     heat_metric = st.selectbox("Heatmap metric", ["CDS", "Equity"])
     st.plotly_chart(chart_heatmap(filtered, heat_metric), use_container_width=True)
-
-with risk_tab:
-    st.caption(
-        "Composite score from the workbook: 60% CDS risk percentile and 40% equity risk percentile, "
-        "calculated within each comparison group."
-    )
-    if filtered_risk["Composite Risk Score"].notna().any():
-        st.plotly_chart(chart_risk_scores(filtered_risk), use_container_width=True)
-    else:
-        st.info("No composite risk scores are available for the selected banks.")
-
-    risk_columns = [
-        "Bank", "Region", "5Y CDS (bps)", "2-Week Equity Return (%)",
-        "CDS Risk Percentile", "Equity Risk Percentile",
-        "Composite Risk Score", "Risk Category",
-    ]
-    st.dataframe(
-        filtered_risk[risk_columns].sort_values("Composite Risk Score", ascending=False).style.format({
-            "5Y CDS (bps)": "{:.1f}",
-            "2-Week Equity Return (%)": "{:+.1f}%",
-            "CDS Risk Percentile": "{:.1f}",
-            "Equity Risk Percentile": "{:.1f}",
-            "Composite Risk Score": "{:.1f}",
-        }, na_rep="—"),
-        use_container_width=True, hide_index=True,
-    )
 
 with data_tab:
     display_columns = ["Bank", "Region", "CDS Now", cds_col, eq_col]
@@ -544,13 +611,21 @@ with data_tab:
 with report_tab:
     st.subheader("Downloadable chart pack")
     st.write(
-        "A print-ready PDF containing the current CDS, equity, heatmap, and composite-risk visualizations."
+        "A print-ready PDF that opens with an executive-summary page, followed by the "
+        "CDS, equity, and heatmap visualizations."
     )
+    if custom_takeaways:
+        st.caption("The executive summary will use your custom key takeaways.")
+    else:
+        st.caption(
+            "The executive summary will use auto-generated key takeaways. "
+            "Add your own in the sidebar to override them."
+        )
     if st.button("Build PDF", type="primary"):
         with st.spinner("Rendering charts…"):
             try:
                 st.session_state["bank_pdf_bytes"] = make_pdf(
-                    filtered, filtered_risk, period, selected_regions, top_n
+                    filtered, period, selected_regions, top_n, takeaways
                 )
             except Exception as exc:
                 st.session_state.pop("bank_pdf_bytes", None)
@@ -567,7 +642,7 @@ with report_tab:
         st.markdown("""
         **CDS:** Higher spreads or positive spread changes normally indicate increased perceived bank credit risk.  
         **Equity:** Negative returns indicate weaker market sentiment toward the bank.  
-        **Composite score:** The workbook combines CDS and equity percentiles. Higher values indicate greater relative market risk.
+        **Key takeaways:** Auto-generated from the largest moves in the current selection, or replaced by your own text from the sidebar.
         """)
 
 st.caption(
