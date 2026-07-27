@@ -269,32 +269,48 @@ def period_extremes(df: pd.DataFrame, period: str) -> dict:
     return out
 
 
-def generate_summary(df: pd.DataFrame, period: str) -> list[str]:
-    """Auto-generated key-takeaway bullets used when the user provides none."""
+def cds_takeaways(df: pd.DataFrame, period: str) -> list[str]:
+    """Auto-generated CDS commentary used when the CDS box is left blank."""
     statements: list[str] = []
-    cds_col, eq_col = f"CDS {period}", f"Equity {period}"
-    cds = df.dropna(subset=[cds_col])
-    equity = df.dropna(subset=[eq_col])
+    col = f"CDS {period}"
+    cds = df.dropna(subset=[col])
     if not cds.empty:
-        low, high = cds[cds_col].min(), cds[cds_col].max()
+        low, high = cds[col].min(), cds[col].max()
+        wider = cds.loc[cds[col].idxmax()]
+        tighter = cds.loc[cds[col].idxmin()]
         statements.append(
             f"Bank CDS moves ranged from {fmt(low, 'bps')} to {fmt(high, 'bps')} "
             f"over the {period} window."
         )
-        wider = cds.loc[cds[cds_col].idxmax()]
         statements.append(
-            f"{wider['Bank']} saw the largest CDS widening at {fmt(wider[cds_col], 'bps')}, "
-            "the biggest deterioration in perceived credit risk."
-        )
-    if not equity.empty:
-        strongest = equity.loc[equity[eq_col].idxmax()]
-        weakest = equity.loc[equity[eq_col].idxmin()]
-        statements.append(
-            f"Equity performance was led by {strongest['Bank']} "
-            f"({fmt(strongest[eq_col], '%')}) and weakest at {weakest['Bank']} "
-            f"({fmt(weakest[eq_col], '%')})."
+            f"{wider['Bank']} saw the largest widening at {fmt(wider[col], 'bps')}; "
+            f"{tighter['Bank']} tightened the most at {fmt(tighter[col], 'bps')}."
         )
     return statements
+
+
+def equity_takeaways(df: pd.DataFrame, period: str) -> list[str]:
+    """Auto-generated equity commentary used when the Equity box is left blank."""
+    statements: list[str] = []
+    col = f"Equity {period}"
+    equity = df.dropna(subset=[col])
+    if not equity.empty:
+        strongest = equity.loc[equity[col].idxmax()]
+        weakest = equity.loc[equity[col].idxmin()]
+        statements.append(
+            f"{strongest['Bank']} led equity performance at {fmt(strongest[col], '%')}; "
+            f"{weakest['Bank']} was weakest at {fmt(weakest[col], '%')}."
+        )
+        statements.append(
+            f"Equity moves ranged from {fmt(equity[col].min(), '%')} "
+            f"to {fmt(equity[col].max(), '%')} over the {period} window."
+        )
+    return statements
+
+
+def generate_summary(df: pd.DataFrame, period: str) -> list[str]:
+    """Combined CDS + Equity commentary, used for the on-screen overview."""
+    return cds_takeaways(df, period) + equity_takeaways(df, period)
 
 
 # --- PDF chart pack ---------------------------------------------------------
@@ -417,55 +433,112 @@ def _card_row(cards: list, col_w: float) -> Table:
     return row
 
 
-def _exec_summary_flowables(df: pd.DataFrame, period: str, takeaways: list[str],
-                            styles, usable_width: float) -> list:
+def _ruled_lines(width: float, count: int = 4, row_h: float = 22) -> Table:
+    """Blank ruled lines to write commentary on by hand."""
+    table = Table([[""] for _ in range(count)], colWidths=[width],
+                  rowHeights=[row_h] * count)
+    table.setStyle(TableStyle([
+        ("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor(RULE)),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    return table
+
+
+def _section_heading(text: str, styles, width: float) -> Table:
+    heading = Table([[Paragraph(text, styles["ExecHeading"])]], colWidths=[width])
+    heading.setStyle(TableStyle([
+        ("LINEBELOW", (0, 0), (-1, -1), 1, colors.HexColor(NAVY)),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    return heading
+
+
+def _extreme_card(extremes: dict, key: str, label: str, column: str, unit: str,
+                  accent: str, suffix: str, width: float, styles) -> Table:
+    row = extremes.get(key)
+    if row is None:
+        return _metric_card(f"{label} · {suffix}", "N/A", "N/A", MUTED, width, styles)
+    return _metric_card(
+        f"{label} · {suffix}", str(row["Bank"]),
+        fmt(row[column], unit), accent, width, styles,
+    )
+
+
+def _notes_flowables(notes: list[str], styles, width: float,
+                     blank_lines: int = 4) -> list:
+    """Render typed commentary as bullets, or blank ruled lines if none given."""
+    out: list = [Spacer(1, 8), Paragraph("NOTES", styles["CardLabel"]), Spacer(1, 4)]
+    if notes:
+        for statement in notes:
+            out.append(Paragraph(statement, styles["ExecBullet"], bulletText="•"))
+    else:
+        out.append(_ruled_lines(width, count=blank_lines))
+    return out
+
+
+def _metric_section(title: str, df: pd.DataFrame, display_periods: list[str],
+                    specs: list[tuple], notes: list[str], styles,
+                    usable_width: float) -> list:
+    """One executive-summary block (CDS or Equity): heading, cards, then notes."""
+    col_w = usable_width / 4.0
+    card_w = col_w - 10
+    flow: list = [_section_heading(title, styles, usable_width), Spacer(1, 8)]
+
+    cards: list = []
+    for display_period in display_periods:
+        extremes = period_extremes(df, display_period)
+        suffix = display_period.upper()
+        for key, label, unit, accent, column_prefix in specs:
+            cards.append(_extreme_card(
+                extremes, key, label, f"{column_prefix} {display_period}",
+                unit, accent, suffix, card_w, styles,
+            ))
+    flow.append(_card_row(cards, col_w))
+    flow.extend(_notes_flowables(notes, styles, usable_width))
+    return flow
+
+
+def _exec_summary_flowables(df: pd.DataFrame, period: str, cds_notes: list[str],
+                            equity_notes: list[str], styles,
+                            usable_width: float) -> list:
     flow: list = [
         Paragraph(f"Executive Summary — Last {period}", styles["ExecTitle"]),
         Paragraph(
             "Largest market movements across bank credit and equity markets.",
             styles["ExecSub"],
         ),
-        Spacer(1, 14),
+        Spacer(1, 16),
     ]
 
-    col_w = usable_width / 4.0
-    card_w = col_w - 10
-    # Show the selected period first, then 5 day as a secondary reference row.
+    # Selected period first, then 5 day as a secondary reference.
     display_periods = [period] + (["5 day"] if period != "5 day" else [])
 
-    for display_period in display_periods:
-        extremes = period_extremes(df, display_period)
-        suffix = display_period.upper()
-        cds_col, eq_col = f"CDS {display_period}", f"Equity {display_period}"
+    cds_specs = [
+        ("cds_wide", "Largest CDS widening", "bps", BAD, "CDS"),
+        ("cds_tight", "Largest CDS tightening", "bps", GOOD, "CDS"),
+    ]
+    equity_specs = [
+        ("eq_strong", "Strongest equity", "%", GOOD, "Equity"),
+        ("eq_weak", "Weakest equity", "%", BAD, "Equity"),
+    ]
 
-        def build(key: str, label: str, column: str, unit: str, accent: str) -> Table:
-            row = extremes.get(key)
-            if row is None:
-                return _metric_card(f"{label} · {suffix}", "N/A", "N/A", MUTED, card_w, styles)
-            return _metric_card(
-                f"{label} · {suffix}", str(row["Bank"]),
-                fmt(row[column], unit), accent, card_w, styles,
-            )
-
-        cards = [
-            build("cds_wide", "Largest CDS widening", cds_col, "bps", BAD),
-            build("cds_tight", "Largest CDS tightening", cds_col, "bps", GOOD),
-            build("eq_strong", "Strongest equity", eq_col, "%", GOOD),
-            build("eq_weak", "Weakest equity", eq_col, "%", BAD),
-        ]
-        flow.append(_card_row(cards, col_w))
-        flow.append(Spacer(1, 10))
-
-    flow.append(Spacer(1, 8))
-    flow.append(Paragraph("Key Takeaways", styles["ExecHeading"]))
-    for statement in takeaways:
-        flow.append(Paragraph(statement, styles["ExecBullet"], bulletText="•"))
+    flow.extend(_metric_section("CDS", df, display_periods, cds_specs,
+                                cds_notes, styles, usable_width))
+    flow.append(Spacer(1, 18))
+    flow.extend(_metric_section("Equity", df, display_periods, equity_specs,
+                                equity_notes, styles, usable_width))
     return flow
 
 
 def make_pdf(
     df: pd.DataFrame, period: str, selected_regions: Iterable[str],
-    top_n: int, takeaways: list[str],
+    top_n: int, cds_notes: list[str], equity_notes: list[str],
 ) -> bytes:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -495,7 +568,9 @@ def make_pdf(
     ]
 
     # Page 1: executive summary.
-    story: list = _exec_summary_flowables(df, period, takeaways, styles, doc.width)
+    story: list = _exec_summary_flowables(
+        df, period, cds_notes, equity_notes, styles, doc.width
+    )
     story.append(PageBreak())
 
     for index, fig in enumerate(figures):
@@ -544,11 +619,20 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("Executive summary")
-    custom_takeaways_raw = st.text_area(
-        "Key takeaways (one per line — leave blank to auto-generate)",
-        height=150,
-        placeholder="Enter your own takeaways, one per line…",
-        help="These appear in the Overview tab and on the executive-summary page of the PDF.",
+    auto_fill = st.checkbox(
+        "Auto-fill commentary from data", value=True,
+        help="When on, the CDS and Equity notes are generated from the largest moves. "
+             "Turn off to leave blank lines you can fill in by hand.",
+    )
+    cds_notes_raw = st.text_area(
+        "CDS commentary (one per line)", height=120,
+        placeholder="Leave blank to auto-fill or to get blank lines…",
+        help="Appears under the CDS section of the executive-summary page.",
+    )
+    equity_notes_raw = st.text_area(
+        "Equity commentary (one per line)", height=120,
+        placeholder="Leave blank to auto-fill or to get blank lines…",
+        help="Appears under the Equity section of the executive-summary page.",
     )
 
 filtered = data[data["Region"].isin(selected_regions)].copy()
@@ -558,9 +642,12 @@ if filtered.empty:
     st.warning("No banks match the selected filters.")
     st.stop()
 
-# User-authored takeaways take priority; otherwise fall back to auto-generation.
-custom_takeaways = [line.strip() for line in custom_takeaways_raw.splitlines() if line.strip()]
-takeaways = custom_takeaways or generate_summary(filtered, period)
+# Typed commentary wins; otherwise auto-fill (if enabled) or leave blank for manual entry.
+cds_notes_manual = [line.strip() for line in cds_notes_raw.splitlines() if line.strip()]
+equity_notes_manual = [line.strip() for line in equity_notes_raw.splitlines() if line.strip()]
+cds_notes = cds_notes_manual or (cds_takeaways(filtered, period) if auto_fill else [])
+equity_notes = equity_notes_manual or (equity_takeaways(filtered, period) if auto_fill else [])
+takeaways = cds_notes + equity_notes
 
 cds_col, eq_col = f"CDS {period}", f"Equity {period}"
 worst_cds = filtered.loc[filtered[cds_col].idxmax()] if filtered[cds_col].notna().any() else None
@@ -589,10 +676,21 @@ overview_tab, ranked_tab, heatmap_tab, data_tab, report_tab = st.tabs([
 
 with overview_tab:
     st.subheader(f"Executive summary — {period}")
-    if custom_takeaways:
-        st.caption("Showing your custom key takeaways.")
-    for statement in takeaways:
-        st.markdown(f"- {statement}")
+    col_cds, col_eq = st.columns(2)
+    with col_cds:
+        st.markdown("**CDS**")
+        if cds_notes:
+            for statement in cds_notes:
+                st.markdown(f"- {statement}")
+        else:
+            st.caption("_To be completed._")
+    with col_eq:
+        st.markdown("**Equity**")
+        if equity_notes:
+            for statement in equity_notes:
+                st.markdown(f"- {statement}")
+        else:
+            st.caption("_To be completed._")
     st.plotly_chart(chart_scatter(filtered, period), use_container_width=True)
 
 with ranked_tab:
@@ -625,18 +723,16 @@ with report_tab:
         "A print-ready PDF that opens with an executive-summary page, followed by the "
         "CDS, equity, and heatmap visualizations."
     )
-    if custom_takeaways:
-        st.caption("The executive summary will use your custom key takeaways.")
-    else:
-        st.caption(
-            "The executive summary will use auto-generated key takeaways. "
-            "Add your own in the sidebar to override them."
-        )
+    st.caption(
+        "The executive-summary page is split into a CDS section and an Equity section. "
+        "Each shows your commentary, the auto-filled notes, or — if you leave a box blank "
+        "with auto-fill off — blank lines to complete by hand."
+    )
     if st.button("Build PDF", type="primary"):
         with st.spinner("Rendering charts…"):
             try:
                 st.session_state["bank_pdf_bytes"] = make_pdf(
-                    filtered, period, selected_regions, top_n, takeaways
+                    filtered, period, selected_regions, top_n, cds_notes, equity_notes
                 )
             except Exception as exc:
                 st.session_state.pop("bank_pdf_bytes", None)
@@ -653,7 +749,7 @@ with report_tab:
         st.markdown("""
         **CDS:** Higher spreads or positive spread changes normally indicate increased perceived bank credit risk.  
         **Equity:** Negative returns indicate weaker market sentiment toward the bank.  
-        **Key takeaways:** Auto-generated from the largest moves in the current selection, or replaced by your own text from the sidebar.
+        **Commentary:** The executive summary has separate CDS and Equity sections. Type notes into the sidebar boxes, let them auto-fill from the largest moves, or leave them blank (with auto-fill off) to print blank lines you can complete by hand.
         """)
 
 st.caption(
