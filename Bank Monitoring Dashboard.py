@@ -126,11 +126,13 @@ METRIC_INFO = {
 }
 
 
-def _source_bytes(uploaded_file) -> bytes:
+def _source_bytes(uploaded_file) -> tuple[bytes, str]:
+    """Return the workbook bytes and a short label describing the source."""
     if uploaded_file is not None:
-        return uploaded_file.getvalue()
+        return uploaded_file.getvalue(), f"uploaded file · {uploaded_file.name}"
     if DEFAULT_FILE.exists():
-        return DEFAULT_FILE.read_bytes()
+        stamp = DEFAULT_FILE.stat().st_mtime
+        return DEFAULT_FILE.read_bytes(), f"default workbook · saved {pd.to_datetime(stamp, unit='s'):%Y-%m-%d %H:%M}"
     raise FileNotFoundError("Upload the Bank Monitoring Model Excel workbook.")
 
 
@@ -518,12 +520,21 @@ st.caption("Interactive monitoring of bank CDS spreads and equity performance.")
 with st.sidebar:
     st.header("Data and filters")
     uploaded = st.file_uploader("Upload updated Bank Monitoring Model", type=["xlsx"])
+
+    # Clearing the cache forces the workbook to be re-read on the next run.
+    if st.button("🔄 Reload data", use_container_width=True,
+                 help="Re-read the workbook and rebuild every chart from the latest saved values."):
+        st.cache_data.clear()
+        st.rerun()
+
     try:
-        source = _source_bytes(uploaded)
+        source, source_label = _source_bytes(uploaded)
         data = load_bank_monitor(source)
     except Exception as exc:
         st.error(f"Could not read the workbook: {exc}")
         st.stop()
+
+    st.caption(f"Source: {source_label}")
 
     available_regions = list(dict.fromkeys(data["Region"].dropna().tolist()))
     selected_regions = st.multiselect("Regions", available_regions, default=available_regions)
@@ -646,5 +657,6 @@ with report_tab:
         """)
 
 st.caption(
-    "Data are read from the cached values saved in the Excel workbook. Refresh the Capital IQ and LSEG plug-ins before uploading the workbook."
+    "Data are read from the cached values saved in the Excel workbook. Save the workbook in Excel "
+    "(after refreshing the Capital IQ and LSEG plug-ins), then re-upload it or press “Reload data”."
 )
