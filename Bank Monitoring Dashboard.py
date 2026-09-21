@@ -244,7 +244,8 @@ def chart_heatmap(df: pd.DataFrame, metric: str, max_rows: int | None = None) ->
     if max_rows is not None:
         heat = heat.head(max_rows)
     fig = px.imshow(
-        heat, aspect="auto", color_continuous_scale="RdYlGn_r",
+        heat, aspect="auto",
+        color_continuous_scale="RdYlGn" if metric == "Equity" else "RdYlGn_r",
         color_continuous_midpoint=0, text_auto=".1f" if len(heat) <= 28 else False,
         title=f"{metric} changes across periods ({METRIC_INFO[metric]['unit']})",
     )
