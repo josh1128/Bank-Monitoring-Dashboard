@@ -25,7 +25,6 @@ HEATMAP_SORT_OPTIONS = [
     "Alphabetical", "Region",
 ]
 
-# --- Shared visual identity -------------------------------------------------
 NAVY = "#17365D"
 INK = "#33404D"
 MUTED = "#7A8794"
@@ -131,7 +130,6 @@ DEFAULT_CDS_THRESHOLDS = {"5 day": 3.0, "2 week": 3.0, "3 month": 10.0, "1 year"
 DEFAULT_EQUITY_THRESHOLDS = {"5 day": 5.0, "2 week": 7.5, "3 month": 15.0, "1 year": 25.0}
 
 
-# --- Data loading -----------------------------------------------------------
 def _source_bytes(uploaded_file) -> tuple[bytes, str]:
     if uploaded_file is not None:
         return uploaded_file.getvalue(), f"uploaded file · {uploaded_file.name}"
@@ -165,11 +163,9 @@ def load_bank_monitor(file_bytes: bytes) -> pd.DataFrame:
         bank = _clean_text(row.iloc[0])
         if not bank or bank in {"Bank", "Distribution"}:
             continue
-
         numeric = pd.to_numeric(row.iloc[2:11], errors="coerce")
         if numeric.isna().all():
             continue
-
         record = {COLUMN_MAP[i]: row.iloc[i] for i in range(11)}
         record["Bank"] = bank
         record["Region"] = _normalize_region(bank, record.pop("Region Raw"))
@@ -178,7 +174,6 @@ def load_bank_monitor(file_bytes: bytes) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     numeric_cols = [c for c in df.columns if c not in {"Bank", "Region"}]
     df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
-
     equity_cols = [f"Equity {p}" for p in PERIODS]
     df[equity_cols] = df[equity_cols] * 100
     return df
@@ -192,7 +187,6 @@ def fmt(value: float, unit: str = "", decimals: int = 1) -> str:
     return f"{sign}{value:,.{decimals}f}{suffix}"
 
 
-# --- Signal logic -----------------------------------------------------------
 def signal_label(cds_change: float, equity_return: float,
                  cds_threshold: float, equity_threshold: float) -> str:
     if pd.isna(cds_change) or pd.isna(equity_return):
@@ -256,7 +250,13 @@ def regional_summary(df: pd.DataFrame, period: str,
             "Banks": len(usable),
             "Deteriorating %": 100 * deteriorating / len(usable),
         })
-    return pd.DataFrame(rows).sort_values(
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return pd.DataFrame(columns=[
+            "Region", f"Avg CDS {period}", f"Avg Equity {period}",
+            "Deteriorating", "Banks", "Deteriorating %",
+        ])
+    return out.sort_values(
         ["Deteriorating %", f"Avg CDS {period}"],
         ascending=[False, False]
     )
@@ -306,7 +306,6 @@ def comparison_table(df: pd.DataFrame, primary_period: str, compare_period: str)
     return out.sort_values(["_current_score", "_delta_score"], ascending=False).drop(columns=["_current_score", "_delta_score"])
 
 
-# --- Charts -----------------------------------------------------------------
 def chart_ranked(df: pd.DataFrame, metric: str, period: str, top_n: int) -> go.Figure:
     col = METRIC_INFO[metric]["columns"][period]
     plot_df = df[["Bank", "Region", col]].dropna().copy()
@@ -347,14 +346,12 @@ def chart_risk_matrix(df: pd.DataFrame, period: str, label_top: int = 8) -> go.F
     y_col = f"Equity {period}"
     plot_df = df.dropna(subset=[x_col, y_col]).copy()
     fig = go.Figure()
-
     if plot_df.empty:
         fig.update_layout(title=f"CDS vs equity risk matrix — {period}")
         return fig
 
     x_limit = max(float(plot_df[x_col].abs().max()) * 1.18, 1.0)
     y_limit = max(float(plot_df[y_col].abs().max()) * 1.18, 1.0)
-
     quadrant_shapes = [
         dict(type="rect", x0=-x_limit, x1=0, y0=0, y1=y_limit,
              fillcolor="rgba(84,130,53,0.10)", line_width=0, layer="below"),
@@ -428,7 +425,6 @@ def chart_heatmap(df: pd.DataFrame, metric: str, sort_by: str = "Largest absolut
                   max_rows: int | None = None) -> go.Figure:
     columns = [METRIC_INFO[metric]["columns"][p] for p in PERIODS]
     work = df[["Bank", "Region", *columns]].copy()
-
     if sort_by == "Alphabetical":
         work = work.sort_values("Bank")
     elif sort_by == "Region":
@@ -439,14 +435,12 @@ def chart_heatmap(df: pd.DataFrame, metric: str, sort_by: str = "Largest absolut
     else:
         work["_abs"] = work[columns].abs().max(axis=1)
         work = work.sort_values("_abs", ascending=False).drop(columns="_abs")
-
     if max_rows is not None:
         work = work.head(max_rows)
 
     labels = work["Bank"].astype(str)
     if sort_by == "Region":
         labels = work["Region"].astype(str) + " · " + labels
-
     heat = work[columns].copy()
     heat.columns = PERIODS
     heat.index = labels
@@ -515,7 +509,6 @@ def chart_bank_detail(df: pd.DataFrame, bank: str) -> go.Figure:
     row = row.iloc[0]
     cds_vals = [row[f"CDS {p}"] for p in PERIODS]
     eq_vals = [row[f"Equity {p}"] for p in PERIODS]
-
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=PERIODS, y=cds_vals, name="CDS change (bps)",
@@ -541,7 +534,6 @@ def chart_bank_detail(df: pd.DataFrame, bank: str) -> go.Figure:
     return fig
 
 
-# --- Executive summary helpers ----------------------------------------------
 def period_extremes(df: pd.DataFrame, period: str) -> dict:
     cds_col, eq_col = f"CDS {period}", f"Equity {period}"
     out: dict = {}
@@ -563,7 +555,6 @@ def generate_summary(df: pd.DataFrame, period: str, compare_period: str,
     usable = df.dropna(subset=[cds_col, eq_col])
     if usable.empty:
         return ["No complete CDS/equity observations are available for the selected filters."]
-
     wider = int((usable[cds_col] > 0).sum())
     equity_down = int((usable[eq_col] < 0).sum())
     both = int(((usable[cds_col] > 0) & (usable[eq_col] < 0)).sum())
@@ -571,7 +562,6 @@ def generate_summary(df: pd.DataFrame, period: str, compare_period: str,
         f"{wider} of {len(usable)} banks recorded CDS widening, {equity_down} posted equity declines, "
         f"and {both} showed both signals over the {period} window."
     )
-
     extremes = period_extremes(usable, period)
     if "cds_wide" in extremes and "eq_weak" in extremes:
         statements.append(
@@ -580,7 +570,6 @@ def generate_summary(df: pd.DataFrame, period: str, compare_period: str,
             f"{extremes['eq_weak']['Bank']} had the weakest equity return at "
             f"{fmt(extremes['eq_weak'][eq_col], '%')}."
         )
-
     reg = regional_summary(usable, period, cds_threshold, equity_threshold)
     if not reg.empty:
         top = reg.iloc[0]
@@ -589,7 +578,6 @@ def generate_summary(df: pd.DataFrame, period: str, compare_period: str,
             f"{int(top['Deteriorating'])} of {int(top['Banks'])} banks "
             f"({top['Deteriorating %']:.0f}%)."
         )
-
     comp = comparison_table(usable, period, compare_period)
     counts = comp["Trend"].value_counts()
     accelerating = int(counts.get("Deterioration accelerating", 0) + counts.get("Recent deterioration", 0))
@@ -601,7 +589,6 @@ def generate_summary(df: pd.DataFrame, period: str, compare_period: str,
     return statements
 
 
-# --- PDF helpers -------------------------------------------------------------
 PAGE_SIZE = landscape(letter)
 MARGIN_X, MARGIN_TOP, MARGIN_BOTTOM = 32, 30, 38
 PDF_MAX_ROWS = 24
@@ -714,7 +701,6 @@ def _df_table(df: pd.DataFrame, widths: list[float] | None = None,
             ("FONTSIZE", (0, 0), (-1, -1), 9),
         ]))
         return table
-
     shown = df.head(max_rows).copy()
     data = [list(shown.columns)] + shown.astype(str).values.tolist()
     table = Table(data, colWidths=widths, repeatRows=1)
@@ -799,7 +785,6 @@ def make_pdf(
     )
     styles = _pdf_styles()
     story: list = []
-
     cds_col, eq_col = f"CDS {period}", f"Equity {period}"
     extremes = period_extremes(df, period)
     both = simultaneous_deterioration(df, period)
@@ -815,7 +800,6 @@ def make_pdf(
         ),
         Spacer(1, 12),
     ])
-
     cards = [
         ("Banks monitored", str(len(df))),
         ("Largest CDS widening", (
@@ -885,7 +869,6 @@ def make_pdf(
         chart_heatmap(df, "Equity", sort_by=heatmap_sort, max_rows=PDF_MAX_ROWS),
         chart_bank_detail(df, selected_bank),
     ]
-
     for idx, fig in enumerate(figures):
         heading = (fig.layout.title.text or "").strip()
         png = _fig_to_png(fig, panel_w, panel_h)
@@ -903,28 +886,24 @@ def make_pdf(
     return buffer.getvalue()
 
 
-# --- App --------------------------------------------------------------------
 st.title("🏦 Bank Market Monitor")
 st.caption("Bank credit and equity monitoring with automated risk signals, regional context, and report-ready outputs.")
 
 with st.sidebar:
     st.header("Data & controls")
     uploaded = st.file_uploader("Upload updated Bank Monitoring Model", type=["xlsx"])
-
     if st.button(
         "🔄 Reload data", use_container_width=True,
         help="Re-read the workbook and rebuild all views from the latest saved values."
     ):
         st.cache_data.clear()
         st.rerun()
-
     try:
         source, source_label = _source_bytes(uploaded)
         data = load_bank_monitor(source)
     except Exception as exc:
         st.error(f"Could not read the workbook: {exc}")
         st.stop()
-
     st.caption(f"Source: {source_label}")
 
     st.markdown("### Filters")
@@ -950,10 +929,8 @@ with st.sidebar:
         value=float(DEFAULT_EQUITY_THRESHOLDS[primary_period]),
         help="Used for watchlist and regional deterioration flags."
     )
-
     st.markdown("### Heatmap")
     heatmap_sort = st.selectbox("Sort rows by", HEATMAP_SORT_OPTIONS)
-
     with st.expander("Report commentary"):
         analyst_notes_raw = st.text_area(
             "Analyst notes (one per line)", height=130,
@@ -987,6 +964,7 @@ k3.metric(
     "Largest CDS tightening",
     extremes["cds_tight"]["Bank"] if "cds_tight" in extremes else "N/A",
     fmt(extremes["cds_tight"][cds_col], "bps") if "cds_tight" in extremes else None,
+    delta_color="inverse",
 )
 
 k4, k5, k6 = st.columns(3)
@@ -994,7 +972,6 @@ k4.metric(
     "Largest equity decline",
     extremes["eq_weak"]["Bank"] if "eq_weak" in extremes else "N/A",
     fmt(extremes["eq_weak"][eq_col], "%") if "eq_weak" in extremes else None,
-    delta_color="inverse",
 )
 k5.metric(
     "Largest equity gain",
@@ -1106,7 +1083,6 @@ with bank_tab:
     bank_choices = sorted(filtered["Bank"].dropna().unique().tolist())
     selected_bank = st.selectbox("Financial institution", bank_choices)
     bank_row = filtered[filtered["Bank"] == selected_bank].iloc[0]
-
     b1, b2, b3 = st.columns(3)
     b1.metric("Region", bank_row["Region"])
     b2.metric("Current CDS", fmt(bank_row["CDS Now"], "bps"))
@@ -1114,7 +1090,6 @@ with bank_tab:
         bank_row[cds_col], bank_row[eq_col], cds_threshold, equity_threshold
     )
     b3.metric("Current signal", bank_signal)
-
     bank_table = pd.DataFrame({
         "Period": PERIODS,
         "CDS change (bps)": [bank_row[f"CDS {p}"] for p in PERIODS],
